@@ -9,10 +9,12 @@ dependencies = [
     "pandas>=2.3.0",
     "pulp>=3.2.1",
     "scikit-learn>=1.7.0",
+    "sympy>=1.14.0",
 ]
 
 [dependency-groups]
 dev = [
     "ipykernel>=6.29.5",
     "pip>=25.1.1",
+    "ucimlrepo>=0.0.7",
 ]

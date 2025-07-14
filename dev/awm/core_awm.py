@@ -1,4 +1,8 @@
 import pandas as pd
+from dev.estimation.estimators import (
+    ConditionalMeanModelFactory,
+    PropensityScoreModelFactory,
+)
 
 
 class AdaptiveWelfareMaximization:
@@ -141,8 +145,11 @@ class AdaptiveWelfareMaximization:
                 cross_fitting_folds=cross_fitting_folds,
                 seed=seed,
             )
+        self.dict_test_data = {}
+        for cv_id in range(self.n_cv_folds):
+            self.dict_test_data[cv_id] = self._get_cv_data(cv_id, "test")
 
-    def estimate_nussance_parameter(
+    def estimate_cf_nussance_parameter(
         self,
         cross_validation_id: int,
         p_score_model_factory,
@@ -200,9 +207,9 @@ class AdaptiveWelfareMaximization:
                 )
             )
 
-            train_data = self._get_dr_score(train_data)
+        train_data = self._get_dr_score(train_data)
 
-    def estimate_all_cf_nussance_parameters(
+    def estimate_all_nussance_parameters(
         self,
         p_score_model_factory,
         conditional_mean_model_factory,
@@ -216,44 +223,99 @@ class AdaptiveWelfareMaximization:
             raise ValueError("Cross-validation must be performed before cross-fitting")
 
         for cv_id in range(self.n_cv_folds):
-            self.estimate_nussance_parameter(
+            self.estimate_cf_nussance_parameter(
                 cross_validation_id=cv_id,
                 p_score_model_factory=p_score_model_factory,
                 conditional_mean_model_factory=conditional_mean_model_factory,
             )
 
+            train_data = self.dict_train_data[cv_id]
+            test_data = self.dict_test_data[cv_id]
+
+            # Fit propensity score model
+            if not self.has_propensity:
+                p_score_model = p_score_model_factory.create_model()
+                p_score_model.fit(
+                    train_data[self.covariate_cols],
+                    train_data[self.treatment_col],
+                )
+                test_data["p_score"] = p_score_model.predict_proba(
+                    test_data[self.covariate_cols]
+                )[:, 1]
+
+            # Fit conditional mean model
+            treated_data = train_data[train_data[self.treatment_col] == 1]
+            control_data = train_data[train_data[self.treatment_col] == 0]
+
+            conditional_mean_model_treat = conditional_mean_model_factory.create_model()
+            conditional_mean_model_treat.fit(
+                treated_data[self.covariate_cols],
+                treated_data[self.outcome_col],
+            )
+            test_data["est_Y(1)"] = conditional_mean_model_treat.predict(
+                test_data[self.covariate_cols]
+            )
+
+            conditional_mean_model_control = (
+                conditional_mean_model_factory.create_model()
+            )
+            conditional_mean_model_control.fit(
+                control_data[self.covariate_cols],
+                control_data[self.outcome_col],
+            )
+            test_data["est_Y(0)"] = conditional_mean_model_control.predict(
+                test_data[self.covariate_cols]
+            )
+
+            test_data = self._get_dr_score(test_data)
+
     def empirical_walfare_maximization(
         self,
-        cross_validation_id: int,
-        empirical_welfare_maximizor,
-    ) -> pd.DataFrame:
+        empirical_welfare_maximizor_factory,
+    ) -> None:
         """
         Calculate the empirical welfare maximization for a given cross-validation fold.
         :param cross_validation_id: The ID of the cross-validation fold.
         :return: DataFrame with the empirical welfare maximization results.
         """
-        if cross_validation_id < 0 or cross_validation_id >= self.n_cv_folds:
-            raise ValueError(f"cv_id must be between 0 and {self.n_cv_folds - 1}")
 
-        train_data = self.dict_train_data[cross_validation_id].copy(deep=True)
+        self.dict_fitted_awm = {}
 
-        if "tau" not in train_data.columns:
-            raise ValueError(
-                "Nuisance parameters must be estimated before calculating empirical welfare maximization"
+        for cv_id in range(self.n_cv_folds):
+            empirical_welfare_maximizor = (
+                empirical_welfare_maximizor_factory.create_model()
             )
 
-        empirical_welfare_maximizor.fit(
-            train_data,
-            covariate_cols=self.covariate_cols,
-            reward_col="tau",
-        )
+            if cv_id < 0 or cv_id >= self.n_cv_folds:
+                raise ValueError(f"cv_id must be between 0 and {self.n_cv_folds - 1}")
 
-        if not hasattr(self, "dict_fitted_awm"):
-            self.dict_fitted_awm = {}
+            train_data = self.dict_train_data[cv_id].copy(deep=True)
 
-        self.dict_fitted_awm[cross_validation_id] = empirical_welfare_maximizor
+            if "tau" not in train_data.columns:
+                raise ValueError(
+                    "Nuisance parameters must be estimated before calculating empirical welfare maximization"
+                )
 
-        return empirical_welfare_maximizor
+            print(f"Solving maximization for fold {cv_id}")
+
+            empirical_welfare_maximizor.fit(
+                train_data,
+                covariate_cols=self.covariate_cols,
+                reward_col="tau",
+            )
+
+            self.dict_fitted_awm[cv_id] = empirical_welfare_maximizor
+
+    def calculate_ooo_welfare(self):
+        self.dict_ooo_welfare = {}
+        for cv_id in range(self.n_cv_folds):
+            test_data = self.dict_test_data[cv_id]
+            test_data = self.dict_fitted_awm[cv_id].apply_threshold(test_data)
+            welfare = (test_data["assignment"] * test_data["tau"]).sum()
+            self.dict_ooo_welfare[cv_id] = welfare
+        self.total_welfare = sum(self.dict_ooo_welfare.values()) / len(self.data)
+
+        return self.total_welfare
 
     def _get_dr_score(
         self,
@@ -279,64 +341,71 @@ class AdaptiveWelfareMaximization:
         )
         return df
 
-
-class PropensityScoreModelFactory:
-    """
-    Factory class to create a propensity score model.
-    """
-
-    def __init__(self, model_type: str):
-        self.model_type = model_type
-
-    def create_model(self):
+    def calculate_final_ewm(
+        self,
+        empirical_welfare_maximizor_factory,
+    ) -> None:
         """
-        Create a propensity score model based on the specified model type.
-        :return: A scikit-learn model instance.
+        Calculate the final empirical welfare maximization for all cross-validation folds.
+        :param cross_validation_id: The ID of the cross-validation fold.
+        :return: DataFrame with the final empirical welfare maximization results.
         """
-        if self.model_type == "logistic":
-            from sklearn.linear_model import LogisticRegression
 
-            return LogisticRegression()
-        else:
-            raise ValueError(f"Unknown model type: {self.model_type}")
+        empirical_welfare_maximizor = empirical_welfare_maximizor_factory.create_model()
 
+        train_data = pd.concat(
+            [self.dict_test_data[cv_id] for cv_id in range(self.n_cv_folds)], axis=0
+        ).reset_index(drop=True)
 
-class ConditionalMeanModelFactory:
-    """
-    Factory class to create a conditional mean model.
-    """
+        empirical_welfare_maximizor.fit(
+            train_data,
+            covariate_cols=self.covariate_cols,
+            reward_col="tau",
+        )
 
-    def __init__(self, model_type: str):
-        self.model_type = model_type
+        self.final_solution = empirical_welfare_maximizor
 
-    def create_model(self):
-        """
-        Create a conditional mean model based on the specified model type.
-        :return: A scikit-learn model instance.
-        """
-        if self.model_type == "OLS":
-            from sklearn.linear_model import LinearRegression
-
-            return LinearRegression()
-        else:
-            raise ValueError(f"Unknown model type: {self.model_type}")
+        return self.final_solution
 
 
 if __name__ == "__main__":
-    from dev.dgp.diagnal import generate_data
+    from dev.dgp.hte import generate_data
     from utils.visualization import scatter
+    from sklearn.preprocessing import PolynomialFeatures
 
-    df = generate_data(n=500, error_variance=0.2)
+    df = generate_data(n=400, error_variance=0.2)
 
     covariates = ["X1", "X2", "X3", "X4"]
     outcome = "Y"
     treatment = "D"
 
-    df_observed = df[covariates + [outcome, treatment]].copy()
+    poly = PolynomialFeatures(degree=2, include_bias=False, interaction_only=False)
+    poly_features = poly.fit_transform(df[covariates])
+    feature_names = poly.get_feature_names_out(covariates)
+    df_poly = pd.DataFrame(poly_features, columns=feature_names)
+
+    df_observed = pd.concat([df_poly, df[[outcome, treatment]]], axis=1)
+
+    covariates_poly = [
+        "X1",
+        "X1^2",
+        "X2",
+        "X2^2",
+        "X1 X2",
+        "X3",
+        "X3^2",
+        "X1 X3",
+        "X2 X3",
+        "X4",
+        "X4^2",
+        "X1 X4",
+        "X2 X4",
+        "X3 X4",
+    ]
 
     awm = AdaptiveWelfareMaximization(
-        df,
-        covariates,
+        df_observed,
+        covariates_poly,
         outcome,
         treatment,
     )
@@ -347,67 +416,67 @@ if __name__ == "__main__":
     p_score_model_factory = PropensityScoreModelFactory(model_type="logistic")
     conditional_mean_model_factory = ConditionalMeanModelFactory(model_type="OLS")
 
-    awm.estimate_all_cf_nussance_parameters(
+    awm.estimate_all_nussance_parameters(
         p_score_model_factory=p_score_model_factory,
         conditional_mean_model_factory=conditional_mean_model_factory,
     )
 
-    og_data = awm.indexed_original_data.copy()
-    train_data = awm.dict_train_data[0].copy(deep=True)
-    train_data = train_data.merge(
-        og_data[["OID", "p_score", "Y(1)", "Y(0)"]],
-        on="OID",
-        how="inner",
-        suffixes=("", "_true"),
-    )
+    # og_data = awm.indexed_original_data.copy()
+    # train_data = awm.dict_train_data[0].copy(deep=True)
+    # train_data = train_data.merge(
+    #     og_data[["OID", "p_score", "Y(1)", "Y(0)"]],
+    #     on="OID",
+    #     how="inner",
+    #     suffixes=("", "_true"),
+    # )
 
-    y_treat = scatter(
-        df=train_data,
-        x_col="Y(1)",
-        y_col="est_Y(1)",
-        color_col="D",
-        title="Estimated Y(1) vs True Y(1)",
-    )
+    # y_treat = scatter(
+    #     df=train_data,
+    #     x_col="Y(1)",
+    #     y_col="est_Y(1)",
+    #     color_col="D",
+    #     title="Estimated Y(1) vs True Y(1)",
+    # )
 
-    y_control = scatter(
-        df=train_data,
-        x_col="Y(0)",
-        y_col="est_Y(0)",
-        color_col="D",
-        title="Estimated Y(0) vs True Y(0)",
-    )
+    # y_control = scatter(
+    #     df=train_data,
+    #     x_col="Y(0)",
+    #     y_col="est_Y(0)",
+    #     color_col="D",
+    #     title="Estimated Y(0) vs True Y(0)",
+    # )
 
-    p_score = scatter(
-        df=train_data,
-        x_col="p_score_true",
-        y_col="p_score",
-        color_col="D",
-        title="Propensity Score vs Treatment",
-    )
+    # p_score = scatter(
+    #     df=train_data,
+    #     x_col="p_score_true",
+    #     y_col="p_score",
+    #     color_col="D",
+    #     title="Propensity Score vs Treatment",
+    # )
 
-    from dev.milp.linear_threshold import LinearThreshold
+    from dev.milp.linear_threshold import LnearThresholdSolverFactory
 
-    awm_solver = LinearThreshold(
-        beta_min=-10,
-        beta_max=10,
-        num_features=2,
+    linear_threshold_factory = LnearThresholdSolverFactory(
+        beta_max=10, beta_min=-10, num_features=3
     )
 
     awm.empirical_walfare_maximization(
-        cross_validation_id=0,
-        empirical_welfare_maximizor=awm_solver,
+        empirical_welfare_maximizor_factory=linear_threshold_factory,
     )
 
-    results = awm_solver.get_results()
+    results = awm.dict_fitted_awm[1].get_results()
 
     results["beta"]  # Coefficients
 
-    data_plot = awm_solver.data
+    data_plot = awm.dict_fitted_awm[1].data
 
     solved = scatter(
         df=data_plot,
         x_col="X1",
         y_col="X2",
         color_col="z",
-        title="fitted plicy",
+        title="fitted policy",
     )
+
+    welfare = awm.calculate_ooo_welfare()
+    print(f"welfare {welfare}")

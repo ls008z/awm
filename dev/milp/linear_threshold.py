@@ -2,6 +2,17 @@ import pulp
 import numpy as np
 
 
+class LnearThresholdSolverFactory:
+
+    def __init__(self, beta_min, beta_max, num_features) -> None:
+        self.beta_min = beta_min
+        self.beta_max = beta_max
+        self.num_features = num_features
+
+    def create_model(self):
+        return LinearThreshold(self.beta_min, self.beta_max, self.num_features)
+
+
 class LinearThreshold:
     def __init__(self, beta_min, beta_max, num_features):
 
@@ -108,15 +119,15 @@ if __name__ == "__main__":
     import pandas as pd
     import numpy as np
 
-    n = 100
+    n = 500
     num_features = 2
     beta_min = -100
     beta_max = 100
     seed = 123
     np.random.seed(seed)
 
-    beta_true = np.array([0.8, -1.0, -1.0])  # True coefficients for
-    # beta_true = np.array([0.2, 1.0, -1.0])  # True coefficients for
+    # beta_true = np.array([0.8, -1.0, -1.0])  # True coefficients for
+    beta_true = np.array([0.2, 1.0, -1.0])  # True coefficients for
 
     # Generate synthetic data
     X = np.random.uniform(0, 1, size=(n, num_features))

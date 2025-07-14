@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 np.random.seed(123)
 
 # Number of samples
-n = 5000
+n = 1000
 
 # Generate covariates x uniformly in range [0, 10]
 x = np.random.uniform(0, 10, n)
@@ -29,7 +29,7 @@ plt.ylabel("r")
 
 
 # Big-M constant
-M = max(x) - min(x) + 1
+M = (max(x) - min(x) + 1) * 10
 epsilon = 1e-5  # small positive constant
 
 # Create the MILP problem

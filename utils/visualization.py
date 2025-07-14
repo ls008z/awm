@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 
 
-def scatter(df, x_col, y_col, color_col=None, title=None):
+def scatter(df, x_col, y_col, s=8, color_col=None, title=None):
     """
     Create a scatter plot from a DataFrame.
     Returns a matplotlib figure.
@@ -18,9 +18,10 @@ def scatter(df, x_col, y_col, color_col=None, title=None):
         df[x_col],
         df[y_col],
         c=df[color_col] if color_col else None,
-        cmap="viridis",
+        cmap="inferno",
         alpha=0.6,
         edgecolors="w",
+        s=s,
     )
 
     if color_col:
