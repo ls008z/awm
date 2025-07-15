@@ -13,6 +13,7 @@ class AdaptiveWelfareMaximization:
         outcome_col: str,
         treatment_col: str,
         propensity_col: str | None = None,
+        verbose: bool = True,
     ):
         """
         Initialize the AdaptiveWelfareMaximization class.
@@ -21,6 +22,7 @@ class AdaptiveWelfareMaximization:
         :param covariate_cols: List of column names for covariates.
         :param outcome_col: Name of the outcome column.
         :param treatment_col: Name of the treatment column.
+        :param verbose: Whether to print progress messages.
         """
 
         indexed_data = (
@@ -43,6 +45,7 @@ class AdaptiveWelfareMaximization:
         self.treatment_col = treatment_col
         self.propensity_col = propensity_col
         self.has_propensity = propensity_col is not None
+        self.verbose = verbose
 
     def cv_sample_splitting(
         self,
@@ -162,9 +165,10 @@ class AdaptiveWelfareMaximization:
 
             estimation_data = train_data[train_data["CFID"] != cf_id].copy(deep=True)
 
-            print(
-                f"Estimating nuisance parameters for CVID {cross_validation_id}, CFID {cf_id}"
-            )
+            if self.verbose:
+                print(
+                    f"Estimating nuisance parameters for CVID {cross_validation_id}, CFID {cf_id}"
+                )
 
             # Fit propensity score model
             if not self.has_propensity:
@@ -272,6 +276,8 @@ class AdaptiveWelfareMaximization:
     def empirical_walfare_maximization(
         self,
         empirical_welfare_maximizor_factory,
+        emw_covariate_cols=None,
+        **kwargs,
     ) -> None:
         """
         Calculate the empirical welfare maximization for a given cross-validation fold.
@@ -296,12 +302,17 @@ class AdaptiveWelfareMaximization:
                     "Nuisance parameters must be estimated before calculating empirical welfare maximization"
                 )
 
-            print(f"Solving maximization for fold {cv_id}")
+            if self.verbose:
+                print(f"Solving maximization for fold {cv_id}")
+
+            if emw_covariate_cols is None:
+                emw_covariate_cols = self.covariate_cols.copy()
 
             empirical_welfare_maximizor.fit(
                 train_data,
-                covariate_cols=self.covariate_cols,
+                covariate_cols=emw_covariate_cols,
                 reward_col="tau",
+                **kwargs,
             )
 
             self.dict_fitted_awm[cv_id] = empirical_welfare_maximizor
@@ -310,7 +321,7 @@ class AdaptiveWelfareMaximization:
         self.dict_ooo_welfare = {}
         for cv_id in range(self.n_cv_folds):
             test_data = self.dict_test_data[cv_id]
-            test_data = self.dict_fitted_awm[cv_id].apply_threshold(test_data)
+            test_data = self.dict_fitted_awm[cv_id].apply_policy(test_data)
             welfare = (test_data["assignment"] * test_data["tau"]).sum()
             self.dict_ooo_welfare[cv_id] = welfare
         self.total_welfare = sum(self.dict_ooo_welfare.values()) / len(self.data)
@@ -344,6 +355,8 @@ class AdaptiveWelfareMaximization:
     def calculate_final_ewm(
         self,
         empirical_welfare_maximizor_factory,
+        emw_covariate_cols=None,
+        **kwargs,
     ) -> None:
         """
         Calculate the final empirical welfare maximization for all cross-validation folds.
@@ -357,15 +370,25 @@ class AdaptiveWelfareMaximization:
             [self.dict_test_data[cv_id] for cv_id in range(self.n_cv_folds)], axis=0
         ).reset_index(drop=True)
 
+        if emw_covariate_cols is None:
+            emw_covariate_cols = self.covariate_cols.copy()
+
         empirical_welfare_maximizor.fit(
             train_data,
-            covariate_cols=self.covariate_cols,
+            covariate_cols=emw_covariate_cols,
             reward_col="tau",
+            **kwargs,
         )
 
         self.final_solution = empirical_welfare_maximizor
 
         return self.final_solution
+
+    def provide_final_training_data(self):
+        final_training_data = pd.concat(
+            [self.dict_test_data[cv_id] for cv_id in range(self.n_cv_folds)], axis=0
+        ).reset_index(drop=True)
+        return final_training_data.copy()
 
 
 if __name__ == "__main__":

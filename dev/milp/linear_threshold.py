@@ -4,7 +4,7 @@ import numpy as np
 
 class LnearThresholdSolverFactory:
 
-    def __init__(self, beta_min, beta_max, num_features) -> None:
+    def __init__(self, beta_min, beta_max, num_features: int = None) -> None:  # type: ignore
         self.beta_min = beta_min
         self.beta_max = beta_max
         self.num_features = num_features
@@ -23,6 +23,9 @@ class LinearThreshold:
         self.epsilon = 1e-6  # Small value for strict inequality approximation
 
     def fit(self, data, covariate_cols, reward_col):
+
+        if self.num_features is None:
+            self.num_features = len(covariate_cols)
 
         self.data = data.copy()
         self.covariate_cols = covariate_cols
@@ -92,7 +95,7 @@ class LinearThreshold:
             "t": [v.value() for v in self.t],
         }
 
-    def apply_threshold(self, data, assignemt_col="assignment"):
+    def apply_policy(self, data, assignemt_col="assignment"):
 
         # check if model is at optimality
         if self.status != "Optimal":

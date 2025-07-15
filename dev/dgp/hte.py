@@ -52,9 +52,55 @@ def add_potential_outcomes_diagnal_effect(
     return df
 
 
-def add_ellipse_hte(
+def add_hte(df: pd.DataFrame, effect_shape="ellipse"):
+    if effect_shape == "ellipse":
+        df = add_ellipse_hte(df)
+    elif effect_shape == "rectangle":
+        df = add_rectangle_hte(df, 0.2, 0.8, 0.2, 0.8)
+    else:
+        raise ValueError("effect_shape must be either 'ellipse' or 'rectangle'")
+    return df
+
+
+def add_rectangle_hte(
     df: pd.DataFrame,
+    border_1_left,
+    border_1_right,
+    border_2_left,
+    border_2_right,
 ):
+    distance_1_left = df["X1"] - border_1_left
+    distance_1_right = border_1_right - df["X1"]
+    distance_2_left = df["X2"] - border_2_left
+    distance_2_right = border_2_right - df["X2"]
+
+    is_in_rectangle = (
+        (distance_1_left >= 0)
+        & (distance_1_right >= 0)
+        & (distance_2_left >= 0)
+        & (distance_2_right >= 0)
+    )
+
+    inside_distance_border = np.minimum.reduce(
+        [distance_1_left, distance_1_right, distance_2_left, distance_2_right]
+    )
+
+    outside_distance_border = pd.Series(
+        [
+            min([x for x in vals if x < 0], default=0)
+            for vals in zip(
+                distance_1_left, distance_1_right, distance_2_left, distance_2_right
+            )
+        ],
+        index=distance_1_left.index,
+    )
+    df["effect_mean"] = is_in_rectangle * inside_distance_border + ~is_in_rectangle * (
+        outside_distance_border
+    )
+    return df
+
+
+def add_ellipse_hte(df: pd.DataFrame, effect_shape="ellipse"):
     ellipse_input = (
         15.625 * df["X1"] ** 2
         - 18.75 * df["X1"] * df["X2"]
@@ -71,17 +117,17 @@ def add_ellipse_hte(
     return df
 
 
-def add_potential_outcomes_ellipse_effect(
+def add_potential_outcomes_with_hte(
     df: pd.DataFrame,
     error_variance: float = 1.0,
+    effect_shape: str = "ellipse",
 ) -> pd.DataFrame:
-    df = df.copy()  # avoid modifying original DataFrame
     df["epsilon_0"] = np.random.normal(0, error_variance, len(df))
     df["epsilon_1"] = np.random.normal(0, error_variance, len(df))
 
     df["Y(0)"] = 0.7 * (df["X3"] + df["X4"] + df["epsilon_0"])
 
-    df = add_ellipse_hte(df)
+    df = add_hte(df, effect_shape=effect_shape)
 
     df["Y(1)"] = df["effect_mean"] + 0.7 * (df["X3"] + df["X4"] + df["epsilon_1"])
 
@@ -123,6 +169,7 @@ def generate_outcome(df: pd.DataFrame) -> pd.DataFrame:
 def generate_data(
     n: int,
     error_variance: float = 1.0,
+    effect_shape="ellipse",
 ) -> pd.DataFrame:
     """
     Generate a DataFrame with independent features X1, X2, X3, and X4,
@@ -135,50 +182,37 @@ def generate_data(
         pd.DataFrame: DataFrame containing the generated data.
     """
     df = generate_x(n)
-    df = add_potential_outcomes_ellipse_effect(df, error_variance)
+    df = add_potential_outcomes_with_hte(df, error_variance, effect_shape=effect_shape)
     df = add_propensity_score(df)
     df = add_treatment(df)
     df = generate_outcome(df)
     return df
 
 
-def plot_effect():
+def plot_effect(effect_shape="ellipse", title=None):
     df = generate_meshgrid_dataframe(100)
-    df = add_ellipse_hte(df)
+    df = add_hte(df, effect_shape=effect_shape)
 
     # Create scatter plot using matplotlib directly
     fig, ax = plt.subplots(figsize=(6, 6))
     scatter = ax.scatter(df["X1"], df["X2"], c=df["effect_mean"], cmap="inferno", s=10)
-    ax.set_title("CATE and Optimal Policy")
+    ax.set_title(title or "CATE and Optimal Policy Border")
     ax.set_xlabel("X1")
     ax.set_ylabel("X2")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_aspect("equal")
-    plt.colorbar(scatter, ax=ax, label="effect")
+    plt.colorbar(scatter, ax=ax, label="CATE")
 
-    # Parameters for the tilted ellipse
-    h, k = 0.5, 0.5  # center
-    a, b = 0.4, 0.2  # axes
-    theta = np.pi / 4  # rotation angle (45 degrees)
+    if effect_shape == "ellipse":
+        plot_ellipse(ax)
+    if effect_shape == "rectangle":
+        plot_rectangle(ax)
 
-    # Create rotated ellipse mask
-    x = np.linspace(0, 1, 800)
-    y = np.linspace(0, 1, 800)
-    X, Y = np.meshgrid(x, y)
-
-    X_rot = (X - h) * np.cos(theta) + (Y - k) * np.sin(theta)
-    Y_rot = -(X - h) * np.sin(theta) + (Y - k) * np.cos(theta)
-    Z = (X_rot / a) ** 2 + (Y_rot / b) ** 2
-
-    # Add contour for the ellipse
-    ax.contour(X, Y, Z, levels=[1], colors="white")
-
-    ax.grid(True)
     plt.show()
 
 
-def plot_policy(awm_solver, n=100):
+def plot_policy(awm_solver, n=100, effect_shape="ellipse", title=None):
     df = generate_meshgrid_dataframe(n)
     df["X3"] = 0.5
     df["X4"] = 0.5
@@ -192,7 +226,7 @@ def plot_policy(awm_solver, n=100):
     df["X_3^2"] = 1 / 3
     df["X_4^2"] = 1 / 3
 
-    df = awm_solver.apply_threshold(df)
+    df = awm_solver.apply_policy(df)
 
     # Color and label mapping
     color_map = {0: "black", 1: "grey"}
@@ -209,8 +243,13 @@ def plot_policy(awm_solver, n=100):
     for value in [0, 1]:
         ax.scatter([], [], c=color_map[value], label=label_map[value], s=30)
 
+    if effect_shape == "ellipse":
+        plot_ellipse(ax)
+    if effect_shape == "rectangle":
+        plot_rectangle(ax)
+
     # Labels and styling
-    ax.set_title("Policy")
+    ax.set_title(title or "Policy")
     ax.set_xlabel("X1")
     ax.set_ylabel("X2")
     ax.set_xlim(0, 1)
@@ -219,6 +258,10 @@ def plot_policy(awm_solver, n=100):
     ax.grid(True)
     ax.legend(title="Assignment")
 
+    plt.show()
+
+
+def plot_ellipse(ax):
     # Parameters for the tilted ellipse
     h, k = 0.5, 0.5  # center
     a, b = 0.4, 0.2  # axes
@@ -237,49 +280,65 @@ def plot_policy(awm_solver, n=100):
     ax.contour(X, Y, Z, levels=[1], colors="white")
 
     ax.grid(True)
-    plt.show()
 
 
-def calculate_optimal_welfare(n=100):
+def plot_rectangle(
+    ax,
+    border_1_left=0.2,
+    border_1_right=0.8,
+    border_2_left=0.2,
+    border_2_right=0.8,
+):
+    # Add rectangle contour
+    ax.plot([border_1_left, border_1_right], [border_2_left, border_2_left], "white")
+    ax.plot([border_1_left, border_1_right], [border_2_right, border_2_right], "white")
+    ax.plot([border_1_left, border_1_left], [border_2_left, border_2_right], "white")
+    ax.plot([border_1_right, border_1_right], [border_2_left, border_2_right], "white")
+
+    ax.grid(True)
+
+
+def calculate_optimal_welfare(effect_shape, n=100):
     df = generate_meshgrid_dataframe(n_points=n)
-    df = add_ellipse_hte(df)
+    df = add_hte(df, effect_shape=effect_shape)
     df["optimal_assignment"] = 1 * (df["effect_mean"] > 0)
     avg_welfare = (df["optimal_assignment"] * df["effect_mean"]).sum() / len(df)
     return avg_welfare
 
 
-def calculate_regret(awm_solver, optimal_welfare, n=10):
-    df = generate_meshgrid_dataframe(n_points=n, d=4)
-    poly = PolynomialFeatures(degree=2, include_bias=False, interaction_only=False)
-    poly_features = poly.fit_transform(df)
-    feature_names = poly.get_feature_names_out(df.columns)
-    df = pd.DataFrame(poly_features, columns=feature_names)
-    df = add_ellipse_hte(df)
-    df = awm_solver.apply_threshold(df)
-    avg_welfare = (df["assignment"] * df["effect_mean"]).sum() / len(df)
-    regret = avg_welfare - optimal_welfare
-    return regret
+# def calculate_regret(awm_solver, optimal_welfare, n=10):
+#     df = generate_meshgrid_dataframe(n_points=n, d=4)
+#     poly = PolynomialFeatures(degree=2, include_bias=False, interaction_only=False)
+#     poly_features = poly.fit_transform(df)
+#     feature_names = poly.get_feature_names_out(df.columns)
+#     df = pd.DataFrame(poly_features, columns=feature_names)
+#     df = add_hte(df)
+#     df = awm_solver.apply_policy(df)
+#     avg_welfare = (df["assignment"] * df["effect_mean"]).sum() / len(df)
+#     regret = avg_welfare - optimal_welfare
+#     return regret
 
 
-def calculate_regret_integrated(awm_solver, optimal_welfare, n=100):
+def calculate_regret_integrated(awm_solver, optimal_welfare, effect_shape, n=100):
     df = generate_meshgrid_dataframe(n_points=n, d=2)
-    df["X3"] = 0.5
-    df["X4"] = 0.5
+    if effect_shape == "ellipse":
+        df["X3"] = 0.5
+        df["X4"] = 0.5
 
-    poly = PolynomialFeatures(degree=3, include_bias=False, interaction_only=False)
-    poly_features = poly.fit_transform(df)
-    feature_names = poly.get_feature_names_out(df.columns)
+        poly = PolynomialFeatures(degree=3, include_bias=False, interaction_only=False)
+        poly_features = poly.fit_transform(df)
+        feature_names = poly.get_feature_names_out(df.columns)
 
-    df = pd.DataFrame(poly_features, columns=feature_names)
+        df = pd.DataFrame(poly_features, columns=feature_names)
 
-    # replace them with E[X_3^2] and E[X_4^2]
-    df["X_3^2"] = 1 / 3
-    df["X_4^2"] = 1 / 3
+        # replace them with E[X_3^2] and E[X_4^2]
+        df["X_3^2"] = 1 / 3
+        df["X_4^2"] = 1 / 3
 
-    df = add_ellipse_hte(df)
-    df = awm_solver.apply_threshold(df)
+    df = add_hte(df, effect_shape=effect_shape)
+    df = awm_solver.apply_policy(df)
     avg_welfare = (df["assignment"] * df["effect_mean"]).sum() / len(df)
-    regret = avg_welfare - optimal_welfare
+    regret = optimal_welfare - avg_welfare
     return regret
 
 
@@ -299,6 +358,7 @@ if __name__ == "__main__":
     df = generate_data(
         n,
         error_variance=error_variance,
+        effect_shape="rectangle",
     )
 
     # print data summary
@@ -318,6 +378,8 @@ if __name__ == "__main__":
         y_col="X2",
         color_col="effect",
     )
+
+    plot_effect(effect_shape="rectangle")
 
     # ----------------------------------------------------------------------
     # Calculate optimal regret
